@@ -1,130 +1,226 @@
+import os
+
 from evidently.report import Report
 from evidently.metric_preset import DataDriftPreset
-import warnings
 
-warnings.filterwarnings("ignore")
 
-# If 30% or more feature columns drift,
-# the pipeline will trigger retraining.
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# Percentage of monitored features that must drift
+# before the system considers the dataset significantly drifted.
 DRIFT_SHARE_THRESHOLD = 0.30
 
-# These columns should NOT participate in feature drift detection.
-# customerID is an identifier, while Churn is the target label.
-EXCLUDED_COLUMNS = {"customerID", "customer_id", "Churn", "churn"}
+
+# Columns that should NOT participate in drift analysis.
+# customerID is an identifier, while Churn is the target.
+EXCLUDED_COLUMNS = {
+    "customerID",
+    "customer_id",
+    "Churn"
+}
 
 
-def detect_drift(reference_data, current_data):
+# ============================================================
+# DRIFT DETECTION
+# ============================================================
+
+def detect_drift(reference_df, current_df):
     """
-    Compare reference data with recent production data.
+    Compare historical reference data against recent production
+    data using Evidently Data Drift analysis.
 
-    Returns a structured dictionary containing:
-    - whether drift was detected
-    - drift share
-    - number of drifted columns
-    - total columns checked
+    Returns:
+        {
+            "drift_share": float,
+            "number_of_columns": int,
+            "number_of_drifted_columns": int,
+            "drift_detected": bool
+        }
     """
 
-    print("Analyzing statistical distributions with Evidently AI...")
+    print(
+        "Analyzing statistical distributions with Evidently AI..."
+    )
 
-    # ---------------------------------------------------------
-    # 1. Select only columns useful for feature drift detection
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # 1. Remove identifiers and target variable
+    # --------------------------------------------------------
+
+    reference_monitor = reference_df.drop(
+        columns=list(EXCLUDED_COLUMNS),
+        errors="ignore"
+    ).copy()
+
+    current_monitor = current_df.drop(
+        columns=list(EXCLUDED_COLUMNS),
+        errors="ignore"
+    ).copy()
+
+    # --------------------------------------------------------
+    # 2. Ensure both datasets use the same columns
+    # --------------------------------------------------------
+
     common_columns = [
-        col
-        for col in reference_data.columns
-        if col in current_data.columns
-        and col not in EXCLUDED_COLUMNS
+        column
+        for column in reference_monitor.columns
+        if column in current_monitor.columns
+    ]
+
+    reference_monitor = reference_monitor[
+        common_columns
+    ]
+
+    current_monitor = current_monitor[
+        common_columns
     ]
 
     if not common_columns:
+
         raise ValueError(
             "No common feature columns available for drift detection."
         )
 
-    reference_features = reference_data[common_columns].copy()
-    current_features = current_data[common_columns].copy()
+    # --------------------------------------------------------
+    # 3. Run Evidently Data Drift analysis
+    # --------------------------------------------------------
 
-    # ---------------------------------------------------------
-    # 2. Build Evidently drift report
-    # ---------------------------------------------------------
-    report = Report(
+    drift_report = Report(
         metrics=[
-            DataDriftPreset(
-                columns=common_columns,
-                drift_share=DRIFT_SHARE_THRESHOLD
-            )
+            DataDriftPreset()
         ]
     )
 
-    report.run(
-        reference_data=reference_features,
-        current_data=current_features
+    drift_report.run(
+        reference_data=reference_monitor,
+        current_data=current_monitor
     )
 
-    results = report.as_dict()
+    # --------------------------------------------------------
+    # 4. Save HTML report
+    # --------------------------------------------------------
 
-    # ---------------------------------------------------------
-    # 3. Safely find DatasetDriftMetric
-    # ---------------------------------------------------------
-    drift_result = None
+    os.makedirs(
+        "monitoring",
+        exist_ok=True
+    )
 
-    for metric in results.get("metrics", []):
-        if metric.get("metric") == "DatasetDriftMetric":
-            drift_result = metric.get("result")
+    report_path = os.path.join(
+        "monitoring",
+        "drift_report.html"
+    )
+
+    drift_report.save_html(
+        report_path
+    )
+
+    # --------------------------------------------------------
+    # 5. Extract dataset drift result safely
+    # --------------------------------------------------------
+
+    report_dict = drift_report.as_dict()
+
+    dataset_drift = None
+
+    for metric in report_dict.get("metrics", []):
+
+        result = metric.get(
+            "result",
+            {}
+        )
+
+        if "dataset_drift" in result:
+
+            dataset_drift = result
+
             break
 
-    if drift_result is None:
-        raise RuntimeError(
-            "Could not extract DatasetDriftMetric "
-            "from Evidently report."
+    if dataset_drift is None:
+
+        raise ValueError(
+            "Could not extract dataset drift metrics from Evidently report."
         )
 
-    # ---------------------------------------------------------
-    # 4. Extract metrics
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # 6. Extract metrics
+    # --------------------------------------------------------
+
     drift_share = float(
-        drift_result.get("share_of_drifted_columns", 0.0)
-    )
-
-    drifted_columns = int(
-        drift_result.get("number_of_drifted_columns", 0)
-    )
-
-    total_columns = int(
-        drift_result.get("number_of_columns", 0)
-    )
-
-    # Prefer Evidently's own dataset-level decision.
-    drift_detected = bool(
-        drift_result.get(
-            "dataset_drift",
-            drift_share >= DRIFT_SHARE_THRESHOLD
+        dataset_drift.get(
+            "share_of_drifted_columns",
+            0.0
         )
     )
 
-    # ---------------------------------------------------------
-    # 5. Structured result
-    # ---------------------------------------------------------
-    metrics = {
-        "drift_detected": drift_detected,
-        "drift_share": drift_share,
-        "drifted_columns": drifted_columns,
-        "total_columns": total_columns
+    number_of_columns = int(
+        dataset_drift.get(
+            "number_of_columns",
+            len(common_columns)
+        )
+    )
+
+    number_of_drifted_columns = int(
+        dataset_drift.get(
+            "number_of_drifted_columns",
+            0
+        )
+    )
+
+    # --------------------------------------------------------
+    # 7. Apply OUR explicit project threshold
+    # --------------------------------------------------------
+
+    drift_detected = (
+        drift_share
+        >= DRIFT_SHARE_THRESHOLD
+    )
+
+    drift_metrics = {
+
+        "drift_share":
+            drift_share,
+
+        "number_of_columns":
+            number_of_columns,
+
+        "number_of_drifted_columns":
+            number_of_drifted_columns,
+
+        "drift_detected":
+            drift_detected
     }
 
-    # ---------------------------------------------------------
-    # 6. Console output
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # 8. Console output
+    # --------------------------------------------------------
+
     if drift_detected:
+
         print(
             f"🚨 Drift detected: "
-            f"{drifted_columns}/{total_columns} columns "
-            f"({drift_share:.2%})"
-        )
-    else:
-        print(
-            f"🟢 No significant drift: "
-            f"{drift_share:.2%} of feature columns drifted."
+            f"{number_of_drifted_columns}/"
+            f"{number_of_columns} columns "
+            f"({drift_share * 100:.2f}%)"
         )
 
-    return metrics
+        print(
+            f"Threshold: "
+            f"{DRIFT_SHARE_THRESHOLD * 100:.0f}%"
+        )
+
+    else:
+
+        print(
+            f"🟢 No significant drift detected: "
+            f"{number_of_drifted_columns}/"
+            f"{number_of_columns} columns "
+            f"({drift_share * 100:.2f}%)"
+        )
+
+    print(
+        f"📄 Evidently report saved to: "
+        f"{report_path}"
+    )
+
+    return drift_metrics

@@ -1,6 +1,7 @@
 import sys
 import os
 import sqlite3
+
 import pandas as pd
 
 from sklearn.model_selection import train_test_split
@@ -48,22 +49,43 @@ from monitoring.drift_detector import detect_drift
 
 MODEL_NAME = "AutoHealChurnModel"
 
+EXPERIMENT_NAME = (
+    "AutoHealML_Churn_Experiment"
+)
+
+MLFLOW_DB_URI = (
+    "sqlite:///mlflow.db"
+)
+
+# ------------------------------------------------------------
+# Retraining thresholds
+# ------------------------------------------------------------
+
 MIN_NEW_SAMPLES = 500
 
-# Candidate must improve F1 by at least 0.01
+# Candidate must improve recent-data F1 by at least 0.01
 MIN_F1_IMPROVEMENT = 0.01
 
-# Secondary metrics are allowed to decrease by at most 3%
+# Other metrics are allowed to decrease by at most 3%
 SAFETY_TOLERANCE = 0.03
 
+# ------------------------------------------------------------
 # Training data ratio
+# ------------------------------------------------------------
+
 HISTORICAL_WEIGHT = 0.70
 RECENT_WEIGHT = 0.30
 
-# Holdout percentage
+# ------------------------------------------------------------
+# Holdout
+# ------------------------------------------------------------
+
 HOLDOUT_SIZE = 0.15
 
+# ------------------------------------------------------------
 # Reproducibility
+# ------------------------------------------------------------
+
 RANDOM_STATE = 42
 
 
@@ -73,11 +95,13 @@ RANDOM_STATE = 42
 
 def fetch_data_from_sql():
     """
-    Fetch historical reference data and recent production data
-    from the simulated production SQLite database.
+    Fetch historical reference data and recent production
+    data from the simulated SQLite production database.
     """
 
-    print("Connecting to simulated production database...")
+    print(
+        "Connecting to simulated production database..."
+    )
 
     db_path = os.path.join(
         os.path.dirname(
@@ -89,15 +113,20 @@ def fetch_data_from_sql():
     )
 
     if not os.path.exists(db_path):
+
         print(
             f"❌ Error: Database not found at {db_path}. "
             "Run setup_database.py first."
         )
+
         return None, None
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(
+        db_path
+    )
 
     try:
+
         reference_df = pd.read_sql(
             "SELECT * FROM historical_logs",
             conn
@@ -111,10 +140,15 @@ def fetch_data_from_sql():
         return reference_df, recent_df
 
     except Exception as e:
-        print(f"❌ Database error: {e}")
+
+        print(
+            f"❌ Database error: {e}"
+        )
+
         return None, None
 
     finally:
+
         conn.close()
 
 
@@ -122,41 +156,61 @@ def fetch_data_from_sql():
 # 2. SCHEMA VALIDATION
 # ============================================================
 
-def validate_schema(reference_df, recent_df):
+def validate_schema(
+    reference_df,
+    recent_df
+):
     """
-    Validate that recent production data contains the
-    required schema.
+    Validate recent production data against the historical
+    reference schema.
 
-    Extra columns are removed so both datasets remain aligned.
+    Extra columns are ignored.
+    Missing columns are treated as a critical failure.
     """
 
-    reference_cols = set(reference_df.columns)
-    recent_cols = set(recent_df.columns)
+    reference_cols = set(
+        reference_df.columns
+    )
 
-    missing_in_recent = reference_cols - recent_cols
-    extra_in_recent = recent_cols - reference_cols
+    recent_cols = set(
+        recent_df.columns
+    )
 
-    # Critical failure
+    missing_in_recent = (
+        reference_cols
+        - recent_cols
+    )
+
+    extra_in_recent = (
+        recent_cols
+        - reference_cols
+    )
+
     if missing_in_recent:
+
         raise ValueError(
             "CRITICAL: Missing columns in recent data: "
             f"{missing_in_recent}"
         )
 
-    # Extra columns are not necessarily fatal.
     if extra_in_recent:
+
         print(
             f"⚠️ Extra columns detected: "
             f"{extra_in_recent}. Ignoring them."
         )
 
-    # Keep recent data aligned to reference schema
     recent_df = recent_df[
-        [col for col in reference_df.columns
-         if col in recent_df.columns]
+        [
+            column
+            for column in reference_df.columns
+            if column in recent_df.columns
+        ]
     ].copy()
 
-    print("✅ Schema validation passed.")
+    print(
+        "✅ Schema validation passed."
+    )
 
     return recent_df
 
@@ -167,7 +221,8 @@ def validate_schema(reference_df, recent_df):
 
 def clean_and_split(df):
     """
-    Clean churn dataset and separate X and y.
+    Clean churn dataset and separate features X
+    from target y.
     """
 
     df = df.copy()
@@ -223,7 +278,9 @@ def clean_and_split(df):
     }
 
     unexpected = (
-        set(df["Churn"].dropna().unique())
+        set(
+            df["Churn"].dropna().unique()
+        )
         - valid_values
     )
 
@@ -238,26 +295,37 @@ def clean_and_split(df):
     # Convert target to binary
     # --------------------------------------------------------
 
-    df["Churn"] = df["Churn"].map({
-        "Yes": 1,
-        "No": 0,
-        "1": 1,
-        "0": 0,
-        1: 1,
-        0: 0
-    })
+    df["Churn"] = df["Churn"].map(
+        {
+            "Yes": 1,
+            "No": 0,
+            "1": 1,
+            "0": 0,
+            1: 1,
+            0: 0
+        }
+    )
 
-    # Remove rows without valid target
+    # --------------------------------------------------------
+    # Remove invalid target rows
+    # --------------------------------------------------------
+
     df = df.dropna(
         subset=["Churn"]
     )
+
+    # --------------------------------------------------------
+    # Separate X and y
+    # --------------------------------------------------------
 
     X = df.drop(
         "Churn",
         axis=1
     )
 
-    y = df["Churn"].astype(int)
+    y = df["Churn"].astype(
+        int
+    )
 
     return X, y
 
@@ -266,23 +334,38 @@ def clean_and_split(df):
 # 4. BUILD MODEL PIPELINE
 # ============================================================
 
-def build_candidate_pipeline(X_train):
+def build_candidate_pipeline(
+    X_train
+):
     """
-    Build complete preprocessing + Random Forest pipeline.
+    Build preprocessing + Random Forest pipeline.
     """
 
-    numeric_cols = X_train.select_dtypes(
-        include=["int64", "float64"]
-    ).columns
+    numeric_cols = (
+        X_train
+        .select_dtypes(
+            include=[
+                "int64",
+                "float64"
+            ]
+        )
+        .columns
+    )
 
-    categorical_cols = X_train.select_dtypes(
-        include=["object", "category"]
-    ).columns
+    categorical_cols = (
+        X_train
+        .select_dtypes(
+            include=[
+                "object",
+                "category"
+            ]
+        )
+        .columns
+    )
 
     preprocessor = ColumnTransformer(
         transformers=[
 
-            # Numeric features
             (
                 "num",
 
@@ -293,14 +376,15 @@ def build_candidate_pipeline(X_train):
                 numeric_cols
             ),
 
-            # Categorical features
             (
                 "cat",
 
                 Pipeline(
                     steps=[
+
                         (
                             "imputer",
+
                             SimpleImputer(
                                 strategy="most_frequent"
                             )
@@ -308,6 +392,7 @@ def build_candidate_pipeline(X_train):
 
                         (
                             "onehot",
+
                             OneHotEncoder(
                                 handle_unknown="ignore"
                             )
@@ -330,6 +415,7 @@ def build_candidate_pipeline(X_train):
 
             (
                 "classifier",
+
                 RandomForestClassifier(
                     n_estimators=100,
                     max_depth=10,
@@ -347,12 +433,18 @@ def build_candidate_pipeline(X_train):
 # 5. EVALUATE MODEL
 # ============================================================
 
-def evaluate_model(model, X_test, y_test):
+def evaluate_model(
+    model,
+    X_test,
+    y_test
+):
     """
-    Calculate all important classification metrics.
+    Calculate classification metrics.
     """
 
-    predictions = model.predict(X_test)
+    predictions = model.predict(
+        X_test
+    )
 
     probabilities = model.predict_proba(
         X_test
@@ -360,52 +452,60 @@ def evaluate_model(model, X_test, y_test):
 
     return {
 
-        "f1_score": f1_score(
-            y_test,
-            predictions,
-            zero_division=0
-        ),
+        "f1_score":
+            f1_score(
+                y_test,
+                predictions,
+                zero_division=0
+            ),
 
-        "precision": precision_score(
-            y_test,
-            predictions,
-            zero_division=0
-        ),
+        "precision":
+            precision_score(
+                y_test,
+                predictions,
+                zero_division=0
+            ),
 
-        "recall": recall_score(
-            y_test,
-            predictions,
-            zero_division=0
-        ),
+        "recall":
+            recall_score(
+                y_test,
+                predictions,
+                zero_division=0
+            ),
 
-        "accuracy": accuracy_score(
-            y_test,
-            predictions
-        ),
+        "accuracy":
+            accuracy_score(
+                y_test,
+                predictions
+            ),
 
-        "roc_auc": roc_auc_score(
-            y_test,
-            probabilities
-        )
+        "roc_auc":
+            roc_auc_score(
+                y_test,
+                probabilities
+            )
     }
 
 
 # ============================================================
-# 6. PROMOTE CANDIDATE TO CHAMPION
+# 6. PROMOTE TO CHAMPION
 # ============================================================
 
 def promote_to_champion(
     run_id,
-    current_champion_version
+    current_champion_version,
+    f1_improvement
 ):
     """
-    Register candidate model and assign the @champion alias.
+    Register candidate model and assign @champion alias.
 
-    The previous champion version is stored as a tag
-    for rollback.
+    The previous champion version is stored so that
+    rollback remains possible.
     """
 
-    client = MlflowClient()
+    client = MlflowClient(
+        tracking_uri=MLFLOW_DB_URI
+    )
 
     model_uri = (
         f"runs:/{run_id}/model"
@@ -418,7 +518,10 @@ def promote_to_champion(
 
     new_version = model_details.version
 
-    # Store previous champion for rollback
+    # --------------------------------------------------------
+    # Store rollback information
+    # --------------------------------------------------------
+
     client.set_model_version_tag(
         MODEL_NAME,
         new_version,
@@ -426,7 +529,31 @@ def promote_to_champion(
         str(current_champion_version)
     )
 
-    # Assign new champion
+    client.set_model_version_tag(
+        MODEL_NAME,
+        new_version,
+        "validation_status",
+        "passed"
+    )
+
+    client.set_model_version_tag(
+        MODEL_NAME,
+        new_version,
+        "promotion_reason",
+        "quality_gate_passed"
+    )
+
+    client.set_model_version_tag(
+        MODEL_NAME,
+        new_version,
+        "f1_improvement",
+        f"{f1_improvement:.6f}"
+    )
+
+    # --------------------------------------------------------
+    # Assign champion alias
+    # --------------------------------------------------------
+
     client.set_registered_model_alias(
         MODEL_NAME,
         "champion",
@@ -445,15 +572,16 @@ def promote_to_champion(
 
 def execute_rollback():
     """
-    Restore the previous champion version using
-    the previous_champion_version tag.
+    Restore the previous champion version.
     """
 
     print(
         "\n🚨 INITIATING ROLLBACK SEQUENCE..."
     )
 
-    client = MlflowClient()
+    client = MlflowClient(
+        tracking_uri=MLFLOW_DB_URI
+    )
 
     try:
 
@@ -506,9 +634,11 @@ def run_orchestrator():
     print(
         "\n================================================"
     )
+
     print(
         "       AUTOHEAL ML RETRAINING PIPELINE"
     )
+
     print(
         "================================================"
     )
@@ -548,7 +678,10 @@ def run_orchestrator():
 
     except ValueError as e:
 
-        print(f"❌ {e}")
+        print(
+            f"❌ {e}"
+        )
+
         return
 
     # --------------------------------------------------------
@@ -593,7 +726,9 @@ def run_orchestrator():
 
         return
 
-    if not drift_metrics["drift_detected"]:
+    if not drift_metrics[
+        "drift_detected"
+    ]:
 
         print(
             "🟢 No significant drift detected."
@@ -614,22 +749,23 @@ def run_orchestrator():
     )
 
     # --------------------------------------------------------
-    # STEP 5: CREATE UNSEEN HOLDOUT
+    # STEP 5: CREATE SEPARATE HOLDOUTS
     # --------------------------------------------------------
 
     print(
-        "\n--- STEP 4: Creating Unseen Holdout ---"
+        "\n--- STEP 4: Creating Separate Holdouts ---"
     )
 
-    # Keep historical and recent holdouts separate first.
     train_ref_df, holdout_ref_df = (
         train_test_split(
             reference_df,
             test_size=HOLDOUT_SIZE,
             random_state=RANDOM_STATE,
-            stratify=reference_df["Churn"]
-            if "Churn" in reference_df.columns
-            else None
+            stratify=(
+                reference_df["Churn"]
+                if "Churn" in reference_df.columns
+                else None
+            )
         )
     )
 
@@ -638,29 +774,49 @@ def run_orchestrator():
             recent_df,
             test_size=HOLDOUT_SIZE,
             random_state=RANDOM_STATE,
-            stratify=recent_df["Churn"]
-            if "Churn" in recent_df.columns
-            else None
-        )
-    )
-
-    # Combine both holdouts.
-    mixed_holdout_df = pd.concat(
-        [
-            holdout_ref_df,
-            holdout_recent_df
-        ],
-        ignore_index=True
-    )
-
-    X_holdout, y_holdout = (
-        clean_and_split(
-            mixed_holdout_df
+            stratify=(
+                recent_df["Churn"]
+                if "Churn" in recent_df.columns
+                else None
+            )
         )
     )
 
     # --------------------------------------------------------
-    # STEP 6: CREATE HISTORICAL + RECENT TRAINING DATA
+    # IMPORTANT:
+    # DO NOT MIX THESE HOLDOUTS.
+    #
+    # Historical holdout:
+    # Protects against catastrophic forgetting.
+    #
+    # Recent holdout:
+    # Measures adaptation to production drift.
+    # --------------------------------------------------------
+
+    X_historical_holdout, y_historical_holdout = (
+        clean_and_split(
+            holdout_ref_df
+        )
+    )
+
+    X_recent_holdout, y_recent_holdout = (
+        clean_and_split(
+            holdout_recent_df
+        )
+    )
+
+    print(
+        f"Historical holdout: "
+        f"{len(holdout_ref_df)} samples"
+    )
+
+    print(
+        f"Recent holdout: "
+        f"{len(holdout_recent_df)} samples"
+    )
+
+    # --------------------------------------------------------
+    # STEP 6: BUILD MIXED TRAINING DATA
     # --------------------------------------------------------
 
     print(
@@ -694,7 +850,6 @@ def run_orchestrator():
         ignore_index=True
     )
 
-    # Actual proportions after sampling
     actual_historical_weight = (
         len(sampled_ref_df)
         / len(mixed_train_df)
@@ -736,7 +891,7 @@ def run_orchestrator():
     )
 
     # --------------------------------------------------------
-    # STEP 8: BUILD CANDIDATE PIPELINE
+    # STEP 8: BUILD CANDIDATE
     # --------------------------------------------------------
 
     print(
@@ -770,11 +925,19 @@ def run_orchestrator():
         "\n--- STEP 7: Evaluating Candidate ---"
     )
 
-    candidate_metrics = (
+    candidate_historical_metrics = (
         evaluate_model(
             candidate_pipeline,
-            X_holdout,
-            y_holdout
+            X_historical_holdout,
+            y_historical_holdout
+        )
+    )
+
+    candidate_recent_metrics = (
+        evaluate_model(
+            candidate_pipeline,
+            X_recent_holdout,
+            y_recent_holdout
         )
     )
 
@@ -786,7 +949,13 @@ def run_orchestrator():
         "\n--- STEP 8: Loading Current Champion ---"
     )
 
-    client = MlflowClient()
+    mlflow.set_tracking_uri(
+        MLFLOW_DB_URI
+    )
+
+    client = MlflowClient(
+        tracking_uri=MLFLOW_DB_URI
+    )
 
     try:
 
@@ -807,10 +976,20 @@ def run_orchestrator():
             )
         )
 
-        champ_metrics = evaluate_model(
-            champion_model,
-            X_holdout,
-            y_holdout
+        champion_historical_metrics = (
+            evaluate_model(
+                champion_model,
+                X_historical_holdout,
+                y_historical_holdout
+            )
+        )
+
+        champion_recent_metrics = (
+            evaluate_model(
+                champion_model,
+                X_recent_holdout,
+                y_recent_holdout
+            )
         )
 
         print(
@@ -831,7 +1010,15 @@ def run_orchestrator():
             "Running cold-start evaluation."
         )
 
-        champ_metrics = {
+        champion_historical_metrics = {
+            "f1_score": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "accuracy": 0.0,
+            "roc_auc": 0.0
+        }
+
+        champion_recent_metrics = {
             "f1_score": 0.0,
             "precision": 0.0,
             "recall": 0.0,
@@ -855,109 +1042,220 @@ def run_orchestrator():
     )
 
     print(
-        "ON UNSEEN MIXED HOLDOUT DATA"
-    )
-
-    print(
         "================================================"
     )
 
     print(
+        "\n--- HISTORICAL HOLDOUT ---"
+    )
+
+    print(
         f"F1 Score : "
-        f"{champ_metrics['f1_score']:.4f} "
+        f"{champion_historical_metrics['f1_score']:.4f} "
         f"vs "
-        f"{candidate_metrics['f1_score']:.4f}"
+        f"{candidate_historical_metrics['f1_score']:.4f}"
     )
 
     print(
         f"Precision: "
-        f"{champ_metrics['precision']:.4f} "
+        f"{champion_historical_metrics['precision']:.4f} "
         f"vs "
-        f"{candidate_metrics['precision']:.4f}"
+        f"{candidate_historical_metrics['precision']:.4f}"
     )
 
     print(
         f"Recall   : "
-        f"{champ_metrics['recall']:.4f} "
+        f"{champion_historical_metrics['recall']:.4f} "
         f"vs "
-        f"{candidate_metrics['recall']:.4f}"
+        f"{candidate_historical_metrics['recall']:.4f}"
     )
 
     print(
         f"Accuracy : "
-        f"{champ_metrics['accuracy']:.4f} "
+        f"{champion_historical_metrics['accuracy']:.4f} "
         f"vs "
-        f"{candidate_metrics['accuracy']:.4f}"
+        f"{candidate_historical_metrics['accuracy']:.4f}"
     )
 
     print(
         f"ROC-AUC  : "
-        f"{champ_metrics['roc_auc']:.4f} "
+        f"{champion_historical_metrics['roc_auc']:.4f} "
         f"vs "
-        f"{candidate_metrics['roc_auc']:.4f}"
+        f"{candidate_historical_metrics['roc_auc']:.4f}"
+    )
+
+    print(
+        "\n--- RECENT PRODUCTION HOLDOUT ---"
+    )
+
+    print(
+        f"F1 Score : "
+        f"{champion_recent_metrics['f1_score']:.4f} "
+        f"vs "
+        f"{candidate_recent_metrics['f1_score']:.4f}"
+    )
+
+    print(
+        f"Precision: "
+        f"{champion_recent_metrics['precision']:.4f} "
+        f"vs "
+        f"{candidate_recent_metrics['precision']:.4f}"
+    )
+
+    print(
+        f"Recall   : "
+        f"{champion_recent_metrics['recall']:.4f} "
+        f"vs "
+        f"{candidate_recent_metrics['recall']:.4f}"
+    )
+
+    print(
+        f"Accuracy : "
+        f"{champion_recent_metrics['accuracy']:.4f} "
+        f"vs "
+        f"{candidate_recent_metrics['accuracy']:.4f}"
+    )
+
+    print(
+        f"ROC-AUC  : "
+        f"{champion_recent_metrics['roc_auc']:.4f} "
+        f"vs "
+        f"{candidate_recent_metrics['roc_auc']:.4f}"
     )
 
     # --------------------------------------------------------
     # STEP 13: QUALITY GATE
     # --------------------------------------------------------
 
-    f1_improvement = (
-        candidate_metrics["f1_score"]
-        - champ_metrics["f1_score"]
+    recent_f1_improvement = (
+        candidate_recent_metrics["f1_score"]
+        - champion_recent_metrics["f1_score"]
+    )
+
+    historical_f1_change = (
+        candidate_historical_metrics["f1_score"]
+        - champion_historical_metrics["f1_score"]
+    )
+
+    recent_secondary_safe = (
+
+        candidate_recent_metrics["recall"]
+        >= (
+            champion_recent_metrics["recall"]
+            - SAFETY_TOLERANCE
+        )
+
+        and
+
+        candidate_recent_metrics["precision"]
+        >= (
+            champion_recent_metrics["precision"]
+            - SAFETY_TOLERANCE
+        )
+
+        and
+
+        candidate_recent_metrics["roc_auc"]
+        >= (
+            champion_recent_metrics["roc_auc"]
+            - SAFETY_TOLERANCE
+        )
+
+        and
+
+        candidate_recent_metrics["accuracy"]
+        >= (
+            champion_recent_metrics["accuracy"]
+            - SAFETY_TOLERANCE
+        )
+    )
+
+    historical_safety = (
+
+        candidate_historical_metrics["f1_score"]
+        >= (
+            champion_historical_metrics["f1_score"]
+            - SAFETY_TOLERANCE
+        )
+
+        and
+
+        candidate_historical_metrics["recall"]
+        >= (
+            champion_historical_metrics["recall"]
+            - SAFETY_TOLERANCE
+        )
+
+        and
+
+        candidate_historical_metrics["precision"]
+        >= (
+            champion_historical_metrics["precision"]
+            - SAFETY_TOLERANCE
+        )
+
+        and
+
+        candidate_historical_metrics["roc_auc"]
+        >= (
+            champion_historical_metrics["roc_auc"]
+            - SAFETY_TOLERANCE
+        )
+
+        and
+
+        candidate_historical_metrics["accuracy"]
+        >= (
+            champion_historical_metrics["accuracy"]
+            - SAFETY_TOLERANCE
+        )
     )
 
     gate_passed = (
 
-        # Primary requirement
-        f1_improvement
+        recent_f1_improvement
         >= MIN_F1_IMPROVEMENT
 
         and
 
-        # Safety checks
-        candidate_metrics["recall"]
-        >= (
-            champ_metrics["recall"]
-            - SAFETY_TOLERANCE
-        )
+        recent_secondary_safe
 
         and
 
-        candidate_metrics["precision"]
-        >= (
-            champ_metrics["precision"]
-            - SAFETY_TOLERANCE
-        )
-
-        and
-
-        candidate_metrics["roc_auc"]
-        >= (
-            champ_metrics["roc_auc"]
-            - SAFETY_TOLERANCE
-        )
-
-        and
-
-        candidate_metrics["accuracy"]
-        >= (
-            champ_metrics["accuracy"]
-            - SAFETY_TOLERANCE
-        )
+        historical_safety
     )
+
+    # --------------------------------------------------------
+    # QUALITY GATE OUTPUT
+    # --------------------------------------------------------
 
     print(
         "\n--- QUALITY GATE ---"
     )
 
     print(
-        f"Required F1 improvement: "
+        f"Required recent F1 improvement: "
         f"+{MIN_F1_IMPROVEMENT:.2f}"
     )
 
     print(
-        f"Actual F1 improvement: "
-        f"{f1_improvement:+.4f}"
+        f"Actual recent F1 improvement: "
+        f"{recent_f1_improvement:+.4f}"
+    )
+
+    print(
+        f"Historical F1 change: "
+        f"{historical_f1_change:+.4f}"
+    )
+
+    print(
+        f"Recent secondary metrics safe: "
+        f"{recent_secondary_safe}"
+    )
+
+    print(
+        f"Historical safety check: "
+        f"{historical_safety}"
     )
 
     if gate_passed:
@@ -972,23 +1270,25 @@ def run_orchestrator():
             "❌ QUALITY GATE FAILED"
         )
 
-   # --------------------------------------------------------
-    # STEP 14: MLflow LOGGING
+    # --------------------------------------------------------
+    # STEP 14: MLFLOW LOGGING
     # --------------------------------------------------------
 
-    mlflow.set_tracking_uri("sqlite:///mlflow.db")
+    mlflow.set_tracking_uri(
+        MLFLOW_DB_URI
+    )
 
     mlflow.set_experiment(
-        "AutoHealML_Churn_Experiment"
+        EXPERIMENT_NAME
     )
 
     with mlflow.start_run(
         run_name="automated_retrain_run"
     ) as run:
 
-        # ----------------------------
-        # Parameters
-        # ----------------------------
+        # ====================================================
+        # PARAMETERS
+        # ====================================================
 
         mlflow.log_param(
             "trigger",
@@ -1020,6 +1320,32 @@ def run_orchestrator():
             actual_recent_weight
         )
 
+        # Explicit sample counts for dashboard
+        mlflow.log_param(
+            "total_train_samples",
+            len(mixed_train_df)
+        )
+
+        mlflow.log_param(
+            "historical_train_samples",
+            len(sampled_ref_df)
+        )
+
+        mlflow.log_param(
+            "recent_train_samples",
+            len(train_recent_df)
+        )
+
+        mlflow.log_param(
+            "historical_holdout_samples",
+            len(holdout_ref_df)
+        )
+
+        mlflow.log_param(
+            "recent_holdout_samples",
+            len(holdout_recent_df)
+        )
+
         mlflow.log_param(
             "train_dataset_size",
             len(mixed_train_df)
@@ -1027,7 +1353,8 @@ def run_orchestrator():
 
         mlflow.log_param(
             "holdout_dataset_size",
-            len(mixed_holdout_df)
+            len(holdout_ref_df)
+            + len(holdout_recent_df)
         )
 
         mlflow.log_param(
@@ -1055,9 +1382,21 @@ def run_orchestrator():
             gate_passed
         )
 
-        # ----------------------------
-        # Drift metrics
-        # ----------------------------
+        mlflow.log_param(
+            "validation_status",
+            "PASSED"
+            if gate_passed
+            else "REJECTED"
+        )
+
+        mlflow.log_param(
+            "champion_version",
+            champ_version
+        )
+
+        # ====================================================
+        # DRIFT METRICS
+        # ====================================================
 
         for key, value in (
             drift_metrics.items()
@@ -1072,48 +1411,111 @@ def run_orchestrator():
                 value
             )
 
-        # ----------------------------
-        # Candidate metrics
-        # ----------------------------
+        # ====================================================
+        # CANDIDATE RECENT METRICS
+        # ====================================================
 
         for metric_name, value in (
-            candidate_metrics.items()
+            candidate_recent_metrics.items()
         ):
 
             mlflow.log_metric(
-                f"candidate_{metric_name}",
+                f"candidate_recent_{metric_name}",
                 value
             )
 
-        # ----------------------------
-        # Champion metrics
-        # ----------------------------
+        # ====================================================
+        # CANDIDATE HISTORICAL METRICS
+        # ====================================================
 
         for metric_name, value in (
-            champ_metrics.items()
+            candidate_historical_metrics.items()
         ):
 
-            if metric_name != "version":
+            mlflow.log_metric(
+                f"candidate_historical_{metric_name}",
+                value
+            )
 
-                mlflow.log_metric(
-                    f"champion_{metric_name}",
-                    value
-                )
+        # ====================================================
+        # CHAMPION RECENT METRICS
+        # ====================================================
 
-        # ----------------------------
-        # Comparison
-        # ----------------------------
+        for metric_name, value in (
+            champion_recent_metrics.items()
+        ):
+
+            mlflow.log_metric(
+                f"champion_recent_{metric_name}",
+                value
+            )
+
+        # ====================================================
+        # CHAMPION HISTORICAL METRICS
+        # ====================================================
+
+        for metric_name, value in (
+            champion_historical_metrics.items()
+        ):
+
+            mlflow.log_metric(
+                f"champion_historical_{metric_name}",
+                value
+            )
+
+        # ====================================================
+        # MAIN COMPARISON METRICS
+        # ====================================================
 
         mlflow.log_metric(
             "f1_improvement",
-            f1_improvement
+            recent_f1_improvement
         )
 
-        # ----------------------------
-        # Model signature
-        # ----------------------------
+        mlflow.log_metric(
+            "historical_f1_change",
+            historical_f1_change
+        )
 
-        sample_input = X_train.head(3)
+        mlflow.log_metric(
+            "recent_recall_change",
+            (
+                candidate_recent_metrics["recall"]
+                - champion_recent_metrics["recall"]
+            )
+        )
+
+        mlflow.log_metric(
+            "recent_roc_auc_change",
+            (
+                candidate_recent_metrics["roc_auc"]
+                - champion_recent_metrics["roc_auc"]
+            )
+        )
+
+        mlflow.log_metric(
+            "historical_recall_change",
+            (
+                candidate_historical_metrics["recall"]
+                - champion_historical_metrics["recall"]
+            )
+        )
+
+        mlflow.log_metric(
+            "historical_roc_auc_change",
+            (
+                candidate_historical_metrics["roc_auc"]
+                - champion_historical_metrics["roc_auc"]
+            )
+        )
+
+        # ====================================================
+        # MODEL SIGNATURE
+        # ====================================================
+
+        sample_input = X_train.head(
+            3
+        )
 
         sample_output = (
             candidate_pipeline.predict(
@@ -1126,9 +1528,9 @@ def run_orchestrator():
             sample_output
         )
 
-        # ----------------------------
-        # Log candidate model
-        # ----------------------------
+        # ====================================================
+        # LOG MODEL
+        # ====================================================
 
         mlflow.sklearn.log_model(
             sk_model=candidate_pipeline,
@@ -1138,9 +1540,9 @@ def run_orchestrator():
             serialization_format="cloudpickle"
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # STEP 15: PROMOTE OR REJECT
-        # ----------------------------------------------------
+        # ====================================================
 
         if gate_passed:
 
@@ -1151,7 +1553,8 @@ def run_orchestrator():
 
             promote_to_champion(
                 run.info.run_id,
-                champ_version
+                champ_version,
+                recent_f1_improvement
             )
 
         else:

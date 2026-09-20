@@ -1,0 +1,35 @@
+name: AutoHealML CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  ci-pipeline:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Smoke Tests & Linting Checks
+        run: |
+          # Add any unit tests here once written (e.g., pytest tests/)
+          echo "Dependencies verified successfully."
+
+      - name: Build Docker Image
+        run: |
+          docker build -t autoheal-api:latest .

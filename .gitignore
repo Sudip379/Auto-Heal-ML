@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+.venv/
+.venv0/
+venv/
+env/
+ENV/
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# MLflow
+mlruns/
+mlflow.db
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment variables
+.env
+.env.*
+*.env
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Large model files (add specific extensions as needed)
+*.pkl
+*.joblib
+*.h5
+*.onnx
+*.pt
+*.pth
+*.bin
+
+# Logs
+*.log
+logs/
+
+# Temp / cache
+.cache/
+tmp/
+temp/

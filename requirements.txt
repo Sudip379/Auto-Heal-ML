@@ -3,4 +3,4 @@ scikit-learn
 fastapi
 uvicorn
 pydantic
-mlflow
+mlflow==3.15.1

@@ -124,6 +124,11 @@ if __name__ == "__main__":
         X, y, test_size=test_size, random_state=42, stratify=y
     )
     
+    # Explicit tracking URI so this always writes to the same
+    # registry retrain.py and main.py read from, regardless of
+    # whether MLFLOW_TRACKING_URI happens to be set in the shell.
+    mlflow.set_tracking_uri("sqlite:///mlflow.db")
+
     mlflow.set_experiment("AutoHealML_Churn_Experiment")
     
     with mlflow.start_run() as run:
@@ -144,13 +149,17 @@ if __name__ == "__main__":
         signature = infer_signature(X_train, full_pipeline.predict(X_train))
         input_example = X_train.head(3)
             
-        mlflow.sklearn.log_model(
+        model_info = mlflow.sklearn.log_model(
             sk_model=full_pipeline,
-            artifact_path="model",
+            name="model",
             registered_model_name="AutoHealChurnModel",
             signature=signature,
-            input_example=input_example
+            input_example=input_example,
+            serialization_format="cloudpickle"
         )
-        
+
         save_model(full_pipeline, MODEL_PATH)
+
         print("✅ Success: Production-ready Pipeline tracked and registered with signature.")
+        print(f"Logged Model URI: {model_info.model_uri}")
+        print(f"Registered Model Version: {model_info.registered_model_version}")

@@ -1,3 +1,7 @@
+import os
+import sqlite3
+from datetime import datetime, timezone
+
 import pandas as pd
 
 from contextlib import asynccontextmanager
@@ -23,6 +27,11 @@ MLFLOW_TRACKING_URI = "sqlite:///mlflow.db"
 
 MODEL_URI = (
     f"models:/{MODEL_NAME}@{MODEL_ALIAS}"
+)
+
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "churn_production.db"
 )
 
 
@@ -100,6 +109,79 @@ def load_production_model():
 
 
 # ============================================================
+# PREDICTION LOGGING
+# ============================================================
+
+def init_prediction_log_table():
+    """
+    Create the prediction_logs table if it does not already exist.
+    Uses the same churn_production.db that historical_logs and
+    recent_production_logs live in (see setup_database.py).
+    """
+
+    conn = sqlite3.connect(DB_PATH)
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prediction_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            customerID TEXT,
+            model_name TEXT NOT NULL,
+            model_alias TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            prediction INTEGER NOT NULL,
+            probability REAL
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def log_prediction(customer_id, prediction, probability):
+    """
+    Best-effort write of one prediction to prediction_logs.
+
+    Deliberately never raises: a logging failure must not turn a
+    successful prediction into a failed API response.
+    """
+
+    try:
+
+        conn = sqlite3.connect(DB_PATH)
+
+        conn.execute(
+            """
+            INSERT INTO prediction_logs
+                (timestamp, customerID, model_name, model_alias,
+                 model_version, prediction, probability)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                customer_id,
+                MODEL_NAME,
+                MODEL_ALIAS,
+                str(loaded_model_version),
+                prediction,
+                probability,
+            ),
+        )
+
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+
+        print(
+            "⚠️ Prediction logging failed "
+            f"(prediction was still returned): {e}"
+        )
+
+
+# ============================================================
 # FASTAPI LIFESPAN
 # ============================================================
 
@@ -121,6 +203,17 @@ async def lifespan(app: FastAPI):
     # --------------------------------------------------------
     # STARTUP
     # --------------------------------------------------------
+
+    try:
+
+        init_prediction_log_table()
+
+    except Exception as e:
+
+        print(
+            "⚠️ Could not initialise prediction_logs table: "
+            f"{e}"
+        )
 
     try:
 
@@ -298,8 +391,11 @@ def predict(
         # Remove customer identifier if supplied
         #
         # The training pipeline removes these identifiers,
-        # so they should not reach the model.
+        # so they should not reach the model. Captured first
+        # so it can still be recorded in prediction_logs.
         # ----------------------------------------------------
+
+        customer_id_value = None
 
         for id_column in [
             "customerID",
@@ -307,6 +403,8 @@ def predict(
         ]:
 
             if id_column in input_data.columns:
+
+                customer_id_value = input_data[id_column].iloc[0]
 
                 input_data = input_data.drop(
                     id_column,
@@ -370,6 +468,17 @@ def predict(
                     input_data
                 )[0][1]
             )
+
+        # ----------------------------------------------------
+        # Log this prediction (best-effort, never blocks
+        # the response)
+        # ----------------------------------------------------
+
+        log_prediction(
+            customer_id_value,
+            prediction,
+            probability
+        )
 
         # ----------------------------------------------------
         # Return prediction response

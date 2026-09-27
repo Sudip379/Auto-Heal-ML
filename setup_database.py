@@ -3,6 +3,13 @@ import sqlite3
 import os
 import numpy as np
 
+# The pandas .sample() call below already uses random_state=42, but the
+# drift-injection step further down uses np.random.rand() directly,
+# which was not seeded — meaning re-running this script produced a
+# different recent_production_logs batch each time. Seeding here makes
+# the whole script fully reproducible.
+np.random.seed(42)
+
 print("Building Mastery-Level SQL Database...")
 
 db_path = "churn_production.db"

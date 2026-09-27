@@ -22,15 +22,10 @@ from sklearn.impute import SimpleImputer
 
 import mlflow
 import mlflow.sklearn
-import mlflow.pyfunc
 
 from mlflow.client import MlflowClient
 from mlflow.models import infer_signature
-
-
-# ============================================================
-# PROJECT IMPORTS
-# ============================================================
+from mlflow.exceptions import MlflowException
 
 sys.path.append(
     os.path.dirname(
@@ -48,60 +43,27 @@ from monitoring.drift_detector import detect_drift
 # ============================================================
 
 MODEL_NAME = "AutoHealChurnModel"
-
-EXPERIMENT_NAME = (
-    "AutoHealML_Churn_Experiment"
-)
-
-MLFLOW_DB_URI = (
-    "sqlite:///mlflow.db"
-)
-
-# ------------------------------------------------------------
-# Retraining thresholds
-# ------------------------------------------------------------
+EXPERIMENT_NAME = "AutoHealML_Churn_Experiment"
+MLFLOW_DB_URI = "sqlite:///mlflow.db"
 
 MIN_NEW_SAMPLES = 500
-
-# Candidate must improve recent-data F1 by at least 0.01
 MIN_F1_IMPROVEMENT = 0.01
-
-# Other metrics are allowed to decrease by at most 3%
 SAFETY_TOLERANCE = 0.03
-
-# ------------------------------------------------------------
-# Training data ratio
-# ------------------------------------------------------------
 
 HISTORICAL_WEIGHT = 0.70
 RECENT_WEIGHT = 0.30
 
-# ------------------------------------------------------------
-# Holdout
-# ------------------------------------------------------------
-
 HOLDOUT_SIZE = 0.15
-
-# ------------------------------------------------------------
-# Reproducibility
-# ------------------------------------------------------------
-
 RANDOM_STATE = 42
 
 
 # ============================================================
-# 1. FETCH DATA FROM SQLITE
+# DATABASE
 # ============================================================
 
 def fetch_data_from_sql():
-    """
-    Fetch historical reference data and recent production
-    data from the simulated SQLite production database.
-    """
 
-    print(
-        "Connecting to simulated production database..."
-    )
+    print("Connecting to simulated production database...")
 
     db_path = os.path.join(
         os.path.dirname(
@@ -121,9 +83,7 @@ def fetch_data_from_sql():
 
         return None, None
 
-    conn = sqlite3.connect(
-        db_path
-    )
+    conn = sqlite3.connect(db_path)
 
     try:
 
@@ -141,9 +101,7 @@ def fetch_data_from_sql():
 
     except Exception as e:
 
-        print(
-            f"❌ Database error: {e}"
-        )
+        print(f"❌ Database error: {e}")
 
         return None, None
 
@@ -153,38 +111,16 @@ def fetch_data_from_sql():
 
 
 # ============================================================
-# 2. SCHEMA VALIDATION
+# SCHEMA VALIDATION
 # ============================================================
 
-def validate_schema(
-    reference_df,
-    recent_df
-):
-    """
-    Validate recent production data against the historical
-    reference schema.
+def validate_schema(reference_df, recent_df):
 
-    Extra columns are ignored.
-    Missing columns are treated as a critical failure.
-    """
+    reference_cols = set(reference_df.columns)
+    recent_cols = set(recent_df.columns)
 
-    reference_cols = set(
-        reference_df.columns
-    )
-
-    recent_cols = set(
-        recent_df.columns
-    )
-
-    missing_in_recent = (
-        reference_cols
-        - recent_cols
-    )
-
-    extra_in_recent = (
-        recent_cols
-        - reference_cols
-    )
+    missing_in_recent = reference_cols - recent_cols
+    extra_in_recent = recent_cols - reference_cols
 
     if missing_in_recent:
 
@@ -208,28 +144,18 @@ def validate_schema(
         ]
     ].copy()
 
-    print(
-        "✅ Schema validation passed."
-    )
+    print("✅ Schema validation passed.")
 
     return recent_df
 
 
 # ============================================================
-# 3. CLEAN DATA
+# DATA CLEANING
 # ============================================================
 
 def clean_and_split(df):
-    """
-    Clean churn dataset and separate features X
-    from target y.
-    """
 
     df = df.copy()
-
-    # --------------------------------------------------------
-    # Remove duplicate customers
-    # --------------------------------------------------------
 
     if "customerID" in df.columns:
 
@@ -253,20 +179,12 @@ def clean_and_split(df):
             axis=1
         )
 
-    # --------------------------------------------------------
-    # Convert TotalCharges safely
-    # --------------------------------------------------------
-
     if "TotalCharges" in df.columns:
 
         df["TotalCharges"] = pd.to_numeric(
             df["TotalCharges"],
             errors="coerce"
         )
-
-    # --------------------------------------------------------
-    # Validate Churn target
-    # --------------------------------------------------------
 
     valid_values = {
         "Yes",
@@ -278,9 +196,7 @@ def clean_and_split(df):
     }
 
     unexpected = (
-        set(
-            df["Churn"].dropna().unique()
-        )
+        set(df["Churn"].dropna().unique())
         - valid_values
     )
 
@@ -290,10 +206,6 @@ def clean_and_split(df):
             "CRITICAL: Unexpected Churn values detected: "
             f"{unexpected}"
         )
-
-    # --------------------------------------------------------
-    # Convert target to binary
-    # --------------------------------------------------------
 
     df["Churn"] = df["Churn"].map(
         {
@@ -306,48 +218,30 @@ def clean_and_split(df):
         }
     )
 
-    # --------------------------------------------------------
-    # Remove invalid target rows
-    # --------------------------------------------------------
-
     df = df.dropna(
         subset=["Churn"]
     )
-
-    # --------------------------------------------------------
-    # Separate X and y
-    # --------------------------------------------------------
 
     X = df.drop(
         "Churn",
         axis=1
     )
 
-    y = df["Churn"].astype(
-        int
-    )
+    y = df["Churn"].astype(int)
 
     return X, y
 
 
 # ============================================================
-# 4. BUILD MODEL PIPELINE
+# CANDIDATE PIPELINE
 # ============================================================
 
-def build_candidate_pipeline(
-    X_train
-):
-    """
-    Build preprocessing + Random Forest pipeline.
-    """
+def build_candidate_pipeline(X_train):
 
     numeric_cols = (
         X_train
         .select_dtypes(
-            include=[
-                "int64",
-                "float64"
-            ]
+            include=["int64", "float64"]
         )
         .columns
     )
@@ -355,10 +249,7 @@ def build_candidate_pipeline(
     categorical_cols = (
         X_train
         .select_dtypes(
-            include=[
-                "object",
-                "category"
-            ]
+            include=["object", "category"]
         )
         .columns
     )
@@ -368,23 +259,19 @@ def build_candidate_pipeline(
 
             (
                 "num",
-
                 SimpleImputer(
                     strategy="median"
                 ),
-
                 numeric_cols
             ),
 
             (
                 "cat",
-
                 Pipeline(
                     steps=[
 
                         (
                             "imputer",
-
                             SimpleImputer(
                                 strategy="most_frequent"
                             )
@@ -392,16 +279,16 @@ def build_candidate_pipeline(
 
                         (
                             "onehot",
-
                             OneHotEncoder(
                                 handle_unknown="ignore"
                             )
                         )
+
                     ]
                 ),
-
                 categorical_cols
             )
+
         ]
     )
 
@@ -415,7 +302,6 @@ def build_candidate_pipeline(
 
             (
                 "classifier",
-
                 RandomForestClassifier(
                     n_estimators=100,
                     max_depth=10,
@@ -423,6 +309,7 @@ def build_candidate_pipeline(
                     class_weight="balanced"
                 )
             )
+
         ]
     )
 
@@ -430,17 +317,10 @@ def build_candidate_pipeline(
 
 
 # ============================================================
-# 5. EVALUATE MODEL
+# MODEL EVALUATION
 # ============================================================
 
-def evaluate_model(
-    model,
-    X_test,
-    y_test
-):
-    """
-    Calculate classification metrics.
-    """
+def evaluate_model(model, X_test, y_test):
 
     predictions = model.predict(
         X_test
@@ -452,63 +332,53 @@ def evaluate_model(
 
     return {
 
-        "f1_score":
-            f1_score(
-                y_test,
-                predictions,
-                zero_division=0
-            ),
+        "f1_score": f1_score(
+            y_test,
+            predictions,
+            zero_division=0
+        ),
 
-        "precision":
-            precision_score(
-                y_test,
-                predictions,
-                zero_division=0
-            ),
+        "precision": precision_score(
+            y_test,
+            predictions,
+            zero_division=0
+        ),
 
-        "recall":
-            recall_score(
-                y_test,
-                predictions,
-                zero_division=0
-            ),
+        "recall": recall_score(
+            y_test,
+            predictions,
+            zero_division=0
+        ),
 
-        "accuracy":
-            accuracy_score(
-                y_test,
-                predictions
-            ),
+        "accuracy": accuracy_score(
+            y_test,
+            predictions
+        ),
 
-        "roc_auc":
-            roc_auc_score(
-                y_test,
-                probabilities
-            )
+        "roc_auc": roc_auc_score(
+            y_test,
+            probabilities
+        )
+
     }
 
 
 # ============================================================
-# 6. PROMOTE TO CHAMPION
+# PROMOTE CANDIDATE
 # ============================================================
 
 def promote_to_champion(
-    run_id,
+    model_uri,
     current_champion_version,
     f1_improvement
 ):
-    """
-    Register candidate model and assign @champion alias.
-
-    The previous champion version is stored so that
-    rollback remains possible.
-    """
 
     client = MlflowClient(
         tracking_uri=MLFLOW_DB_URI
     )
 
-    model_uri = (
-        f"runs:/{run_id}/model"
+    print(
+        "\nRegistering validated candidate model..."
     )
 
     model_details = mlflow.register_model(
@@ -517,10 +387,6 @@ def promote_to_champion(
     )
 
     new_version = model_details.version
-
-    # --------------------------------------------------------
-    # Store rollback information
-    # --------------------------------------------------------
 
     client.set_model_version_tag(
         MODEL_NAME,
@@ -550,10 +416,6 @@ def promote_to_champion(
         f"{f1_improvement:.6f}"
     )
 
-    # --------------------------------------------------------
-    # Assign champion alias
-    # --------------------------------------------------------
-
     client.set_registered_model_alias(
         MODEL_NAME,
         "champion",
@@ -567,13 +429,10 @@ def promote_to_champion(
 
 
 # ============================================================
-# 7. ROLLBACK
+# ROLLBACK
 # ============================================================
 
 def execute_rollback():
-    """
-    Restore the previous champion version.
-    """
 
     print(
         "\n🚨 INITIATING ROLLBACK SEQUENCE..."
@@ -598,7 +457,10 @@ def execute_rollback():
             )
         )
 
-        if not previous_version:
+        if (
+            not previous_version
+            or previous_version == "None"
+        ):
 
             print(
                 "❌ Rollback failed: "
@@ -626,7 +488,7 @@ def execute_rollback():
 
 
 # ============================================================
-# 8. MAIN ORCHESTRATOR
+# MAIN ORCHESTRATOR
 # ============================================================
 
 def run_orchestrator():
@@ -643,9 +505,10 @@ def run_orchestrator():
         "================================================"
     )
 
-    # --------------------------------------------------------
-    # STEP 1: FETCH DATA
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STEP 1
+    # ========================================================
 
     print(
         "\n--- STEP 1: Fetching Data ---"
@@ -659,11 +522,13 @@ def run_orchestrator():
         reference_df is None
         or recent_df is None
     ):
+
         return
 
-    # --------------------------------------------------------
-    # STEP 2: SCHEMA VALIDATION
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STEP 2
+    # ========================================================
 
     print(
         "\n--- STEP 2: Validating Schema ---"
@@ -684,28 +549,28 @@ def run_orchestrator():
 
         return
 
-    # --------------------------------------------------------
-    # STEP 3: MINIMUM DATA GATE
-    # --------------------------------------------------------
 
     if len(recent_df) < MIN_NEW_SAMPLES:
 
         print(
             f"⚠️ Not enough new data "
             f"({len(recent_df)} samples). "
-            f"Minimum required: {MIN_NEW_SAMPLES}."
+            f"Minimum required: "
+            f"{MIN_NEW_SAMPLES}."
         )
 
         return
+
 
     print(
         f"✅ Recent production data: "
         f"{len(recent_df)} samples"
     )
 
-    # --------------------------------------------------------
-    # STEP 4: DRIFT DETECTION
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STEP 3
+    # ========================================================
 
     print(
         "\n--- STEP 3: Checking Data Drift ---"
@@ -726,9 +591,8 @@ def run_orchestrator():
 
         return
 
-    if not drift_metrics[
-        "drift_detected"
-    ]:
+
+    if not drift_metrics["drift_detected"]:
 
         print(
             "🟢 No significant drift detected."
@@ -740,6 +604,7 @@ def run_orchestrator():
 
         return
 
+
     print(
         "\n⚠️ DATA DRIFT DETECTED!"
     )
@@ -748,9 +613,10 @@ def run_orchestrator():
         "Initiating automated retraining..."
     )
 
-    # --------------------------------------------------------
-    # STEP 5: CREATE SEPARATE HOLDOUTS
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STEP 4
+    # ========================================================
 
     print(
         "\n--- STEP 4: Creating Separate Holdouts ---"
@@ -782,16 +648,6 @@ def run_orchestrator():
         )
     )
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # DO NOT MIX THESE HOLDOUTS.
-    #
-    # Historical holdout:
-    # Protects against catastrophic forgetting.
-    #
-    # Recent holdout:
-    # Measures adaptation to production drift.
-    # --------------------------------------------------------
 
     X_historical_holdout, y_historical_holdout = (
         clean_and_split(
@@ -805,6 +661,7 @@ def run_orchestrator():
         )
     )
 
+
     print(
         f"Historical holdout: "
         f"{len(holdout_ref_df)} samples"
@@ -815,9 +672,10 @@ def run_orchestrator():
         f"{len(holdout_recent_df)} samples"
     )
 
-    # --------------------------------------------------------
-    # STEP 6: BUILD MIXED TRAINING DATA
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STEP 5
+    # ========================================================
 
     print(
         "\n--- STEP 5: Building Training Dataset ---"
@@ -850,6 +708,7 @@ def run_orchestrator():
         ignore_index=True
     )
 
+
     actual_historical_weight = (
         len(sampled_ref_df)
         / len(mixed_train_df)
@@ -859,6 +718,7 @@ def run_orchestrator():
         len(train_recent_df)
         / len(mixed_train_df)
     )
+
 
     print(
         f"Historical training samples: "
@@ -880,9 +740,6 @@ def run_orchestrator():
         f"{actual_recent_weight:.2%}"
     )
 
-    # --------------------------------------------------------
-    # STEP 7: CLEAN TRAINING DATA
-    # --------------------------------------------------------
 
     X_train, y_train = (
         clean_and_split(
@@ -890,9 +747,10 @@ def run_orchestrator():
         )
     )
 
-    # --------------------------------------------------------
-    # STEP 8: BUILD CANDIDATE
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STEP 6
+    # ========================================================
 
     print(
         "\n--- STEP 6: Building Candidate Model ---"
@@ -904,9 +762,6 @@ def run_orchestrator():
         )
     )
 
-    # --------------------------------------------------------
-    # STEP 9: TRAIN
-    # --------------------------------------------------------
 
     print(
         "Training candidate pipeline..."
@@ -917,13 +772,15 @@ def run_orchestrator():
         y_train
     )
 
-    # --------------------------------------------------------
-    # STEP 10: EVALUATE CANDIDATE
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STEP 7
+    # ========================================================
 
     print(
         "\n--- STEP 7: Evaluating Candidate ---"
     )
+
 
     candidate_historical_metrics = (
         evaluate_model(
@@ -933,6 +790,7 @@ def run_orchestrator():
         )
     )
 
+
     candidate_recent_metrics = (
         evaluate_model(
             candidate_pipeline,
@@ -941,9 +799,10 @@ def run_orchestrator():
         )
     )
 
-    # --------------------------------------------------------
-    # STEP 11: LOAD CURRENT CHAMPION
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STEP 8
+    # ========================================================
 
     print(
         "\n--- STEP 8: Loading Current Champion ---"
@@ -956,6 +815,9 @@ def run_orchestrator():
     client = MlflowClient(
         tracking_uri=MLFLOW_DB_URI
     )
+
+
+    champion_exists = True
 
     try:
 
@@ -970,11 +832,25 @@ def run_orchestrator():
             champion_version_info.version
         )
 
+        print(
+            f"Current Champion: v{champ_version}"
+        )
+
+        print(
+            "Loading champion model from "
+            "MLflow Model Registry..."
+        )
+
         champion_model = (
-            mlflow.pyfunc.load_model(
+            mlflow.sklearn.load_model(
                 f"models:/{MODEL_NAME}@champion"
             )
         )
+
+        print(
+            "✅ Existing @champion loaded successfully."
+        )
+
 
         champion_historical_metrics = (
             evaluate_model(
@@ -984,6 +860,7 @@ def run_orchestrator():
             )
         )
 
+
         champion_recent_metrics = (
             evaluate_model(
                 champion_model,
@@ -992,45 +869,75 @@ def run_orchestrator():
             )
         )
 
-        print(
-            f"Current Champion: v{champ_version}"
-        )
+
+    except MlflowException as e:
+
+        error_message = str(e).lower()
+
+        if (
+            "registered model" in error_message
+            or "no such model" in error_message
+            or "alias" in error_message
+            or "not found" in error_message
+        ):
+
+            print(
+                "⚠️ No existing @champion found."
+            )
+
+            print(
+                f"Reason: {e}"
+            )
+
+            print(
+                "Running cold-start evaluation."
+            )
+
+            champion_exists = False
+            champ_version = "None"
+
+            champion_historical_metrics = {
+                "f1_score": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+                "accuracy": 0.0,
+                "roc_auc": 0.0
+            }
+
+            champion_recent_metrics = {
+                "f1_score": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+                "accuracy": 0.0,
+                "roc_auc": 0.0
+            }
+
+        else:
+
+            print(
+                "❌ MLflow champion lookup/load failed."
+            )
+
+            raise
+
 
     except Exception as e:
 
         print(
-            "⚠️ No existing @champion found."
+            "❌ Unexpected error while loading "
+            "the current champion."
         )
 
         print(
             f"Reason: {e}"
         )
 
-        print(
-            "Running cold-start evaluation."
-        )
+        raise
 
-        champion_historical_metrics = {
-            "f1_score": 0.0,
-            "precision": 0.0,
-            "recall": 0.0,
-            "accuracy": 0.0,
-            "roc_auc": 0.0
-        }
 
-        champion_recent_metrics = {
-            "f1_score": 0.0,
-            "precision": 0.0,
-            "recall": 0.0,
-            "accuracy": 0.0,
-            "roc_auc": 0.0
-        }
-
-        champ_version = "None"
-
-    # --------------------------------------------------------
-    # STEP 12: SHOWDOWN
-    # --------------------------------------------------------
+    # ========================================================
+    # STEP 9
+    # ========================================================
 
     print(
         "\n================================================"
@@ -1044,6 +951,7 @@ def run_orchestrator():
     print(
         "================================================"
     )
+
 
     print(
         "\n--- HISTORICAL HOLDOUT ---"
@@ -1084,6 +992,7 @@ def run_orchestrator():
         f"{candidate_historical_metrics['roc_auc']:.4f}"
     )
 
+
     print(
         "\n--- RECENT PRODUCTION HOLDOUT ---"
     )
@@ -1123,19 +1032,22 @@ def run_orchestrator():
         f"{candidate_recent_metrics['roc_auc']:.4f}"
     )
 
-    # --------------------------------------------------------
-    # STEP 13: QUALITY GATE
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STEP 10: QUALITY GATE
+    # ========================================================
 
     recent_f1_improvement = (
         candidate_recent_metrics["f1_score"]
         - champion_recent_metrics["f1_score"]
     )
 
+
     historical_f1_change = (
         candidate_historical_metrics["f1_score"]
         - champion_historical_metrics["f1_score"]
     )
+
 
     recent_secondary_safe = (
 
@@ -1168,7 +1080,9 @@ def run_orchestrator():
             champion_recent_metrics["accuracy"]
             - SAFETY_TOLERANCE
         )
+
     )
+
 
     historical_safety = (
 
@@ -1209,25 +1123,35 @@ def run_orchestrator():
             champion_historical_metrics["accuracy"]
             - SAFETY_TOLERANCE
         )
+
     )
 
-    gate_passed = (
 
-        recent_f1_improvement
-        >= MIN_F1_IMPROVEMENT
+    # ========================================================
+    # COLD START / EXISTING CHAMPION GATE
+    # ========================================================
 
-        and
+    if not champion_exists:
 
-        recent_secondary_safe
+        gate_passed = True
 
-        and
+    else:
 
-        historical_safety
-    )
+        gate_passed = (
 
-    # --------------------------------------------------------
-    # QUALITY GATE OUTPUT
-    # --------------------------------------------------------
+            recent_f1_improvement
+            >= MIN_F1_IMPROVEMENT
+
+            and
+
+            recent_secondary_safe
+
+            and
+
+            historical_safety
+
+        )
+
 
     print(
         "\n--- QUALITY GATE ---"
@@ -1258,6 +1182,15 @@ def run_orchestrator():
         f"{historical_safety}"
     )
 
+
+    if not champion_exists:
+
+        print(
+            "Cold-start mode: "
+            "no previous champion exists."
+        )
+
+
     if gate_passed:
 
         print(
@@ -1270,9 +1203,10 @@ def run_orchestrator():
             "❌ QUALITY GATE FAILED"
         )
 
-    # --------------------------------------------------------
-    # STEP 14: MLFLOW LOGGING
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STEP 11: MLFLOW RUN
+    # ========================================================
 
     mlflow.set_tracking_uri(
         MLFLOW_DB_URI
@@ -1282,13 +1216,15 @@ def run_orchestrator():
         EXPERIMENT_NAME
     )
 
+
     with mlflow.start_run(
         run_name="automated_retrain_run"
     ) as run:
 
-        # ====================================================
+
+        # ----------------------------------------------------
         # PARAMETERS
-        # ====================================================
+        # ----------------------------------------------------
 
         mlflow.log_param(
             "trigger",
@@ -1320,7 +1256,6 @@ def run_orchestrator():
             actual_recent_weight
         )
 
-        # Explicit sample counts for dashboard
         mlflow.log_param(
             "total_train_samples",
             len(mixed_train_df)
@@ -1353,8 +1288,10 @@ def run_orchestrator():
 
         mlflow.log_param(
             "holdout_dataset_size",
-            len(holdout_ref_df)
-            + len(holdout_recent_df)
+            (
+                len(holdout_ref_df)
+                + len(holdout_recent_df)
+            )
         )
 
         mlflow.log_param(
@@ -1394,13 +1331,12 @@ def run_orchestrator():
             champ_version
         )
 
-        # ====================================================
-        # DRIFT METRICS
-        # ====================================================
 
-        for key, value in (
-            drift_metrics.items()
-        ):
+        # ----------------------------------------------------
+        # DRIFT METRICS
+        # ----------------------------------------------------
+
+        for key, value in drift_metrics.items():
 
             if isinstance(value, bool):
 
@@ -1411,9 +1347,10 @@ def run_orchestrator():
                 value
             )
 
-        # ====================================================
-        # CANDIDATE RECENT METRICS
-        # ====================================================
+
+        # ----------------------------------------------------
+        # CANDIDATE METRICS
+        # ----------------------------------------------------
 
         for metric_name, value in (
             candidate_recent_metrics.items()
@@ -1424,9 +1361,6 @@ def run_orchestrator():
                 value
             )
 
-        # ====================================================
-        # CANDIDATE HISTORICAL METRICS
-        # ====================================================
 
         for metric_name, value in (
             candidate_historical_metrics.items()
@@ -1437,9 +1371,10 @@ def run_orchestrator():
                 value
             )
 
-        # ====================================================
-        # CHAMPION RECENT METRICS
-        # ====================================================
+
+        # ----------------------------------------------------
+        # CHAMPION METRICS
+        # ----------------------------------------------------
 
         for metric_name, value in (
             champion_recent_metrics.items()
@@ -1450,9 +1385,6 @@ def run_orchestrator():
                 value
             )
 
-        # ====================================================
-        # CHAMPION HISTORICAL METRICS
-        # ====================================================
 
         for metric_name, value in (
             champion_historical_metrics.items()
@@ -1463,9 +1395,10 @@ def run_orchestrator():
                 value
             )
 
-        # ====================================================
-        # MAIN COMPARISON METRICS
-        # ====================================================
+
+        # ----------------------------------------------------
+        # COMPARISON METRICS
+        # ----------------------------------------------------
 
         mlflow.log_metric(
             "f1_improvement",
@@ -1509,13 +1442,12 @@ def run_orchestrator():
             )
         )
 
-        # ====================================================
-        # MODEL SIGNATURE
-        # ====================================================
 
-        sample_input = X_train.head(
-            3
-        )
+        # ----------------------------------------------------
+        # LOG CANDIDATE MODEL
+        # ----------------------------------------------------
+
+        sample_input = X_train.head(3)
 
         sample_output = (
             candidate_pipeline.predict(
@@ -1528,21 +1460,38 @@ def run_orchestrator():
             sample_output
         )
 
-        # ====================================================
-        # LOG MODEL
-        # ====================================================
 
-        mlflow.sklearn.log_model(
+        # IMPORTANT:
+        # MLflow 3 uses a logged-model URI/model ID.
+        # Do not construct runs:/<run_id>/model manually.
+
+        model_info = mlflow.sklearn.log_model(
             sk_model=candidate_pipeline,
-            artifact_path="model",
+            name="model",
             signature=signature,
             input_example=sample_input,
             serialization_format="cloudpickle"
         )
 
-        # ====================================================
-        # STEP 15: PROMOTE OR REJECT
-        # ====================================================
+
+        print(
+            f"\nLogged candidate model:"
+        )
+
+        print(
+            f"Model URI: "
+            f"{model_info.model_uri}"
+        )
+
+        print(
+            f"Model ID: "
+            f"{model_info.model_id}"
+        )
+
+
+        # ----------------------------------------------------
+        # PROMOTION
+        # ----------------------------------------------------
 
         if gate_passed:
 
@@ -1552,7 +1501,7 @@ def run_orchestrator():
             )
 
             promote_to_champion(
-                run.info.run_id,
+                model_info.model_uri,
                 champ_version,
                 recent_f1_improvement
             )
@@ -1566,6 +1515,11 @@ def run_orchestrator():
             print(
                 "Current champion remains unchanged."
             )
+
+
+    # ========================================================
+    # COMPLETE
+    # ========================================================
 
     print(
         "\n================================================"

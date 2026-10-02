@@ -23,7 +23,8 @@ MODEL_NAME = "AutoHealChurnModel"
 
 MODEL_ALIAS = "champion"
 
-MLFLOW_TRACKING_URI = "sqlite:///mlflow.db"
+# ISE UPDATE KAREIN: File path ki jagah Docker ka host address use karein
+MLFLOW_TRACKING_URI = "http://10.79.157.18:5000"
 
 MODEL_URI = (
     f"models:/{MODEL_NAME}@{MODEL_ALIAS}"

@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import mlflow
+import sqlite3
 
 from mlflow.client import MlflowClient
 from pathlib import Path
@@ -42,6 +43,37 @@ MODEL_NAME = (
 EXPERIMENT_NAME = (
     "AutoHealML_Churn_Experiment"
 )
+
+DB_PATH = "churn_production.db"
+
+total_predictions = 0
+churn_yes = 0
+churn_no = 0
+
+try:
+    conn = sqlite3.connect(DB_PATH)
+
+    total_predictions = conn.execute(
+        "SELECT COUNT(*) FROM prediction_logs"
+    ).fetchone()[0]
+
+    distribution = conn.execute(
+        """
+        SELECT prediction, COUNT(*)
+        FROM prediction_logs
+        GROUP BY prediction
+        """
+    ).fetchall()
+
+    for prediction, count in distribution:
+        if int(prediction) == 1:
+            churn_yes = count
+        else:
+            churn_no = count
+
+    conn.close()
+except Exception:
+    pass
 
 
 # ============================================================
@@ -349,7 +381,7 @@ except Exception as e:
 # 5. TOP KPIs
 # ============================================================
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 
 
 with col1:
@@ -417,9 +449,32 @@ with col3:
         )
     )
 
+with col4:
+
+    st.metric(
+        label="Total Predictions",
+        value=total_predictions
+    )
+
 
 st.markdown("---")
 
+st.subheader("📈 PREDICTION DISTRIBUTION")
+
+prediction_df = pd.DataFrame(
+    {
+        "Prediction": ["Churn No", "Churn Yes"],
+        "Count": [churn_no, churn_yes]
+    }
+)
+
+st.bar_chart(
+    prediction_df,
+    x="Prediction",
+    y="Count"
+)
+
+st.markdown("---")
 
 # ============================================================
 # 6. MAIN DASHBOARD

@@ -127,7 +127,8 @@ if __name__ == "__main__":
     # Explicit tracking URI so this always writes to the same
     # registry retrain.py and main.py read from, regardless of
     # whether MLFLOW_TRACKING_URI happens to be set in the shell.
-    mlflow.set_tracking_uri("sqlite:///mlflow.db")
+    mlflow.set_tracking_uri("http://127.0.0.1:5000") 
+# Make sure to remove or comment out "sqlite:///mlflow.db"
 
     mlflow.set_experiment("AutoHealML_Churn_Experiment")
     
